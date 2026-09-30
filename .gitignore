@@ -1,4 +1,6 @@
 .idea
+.agents
+skills-lock.json
 dist
 dist-electron
 node_modules
