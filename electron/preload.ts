@@ -1,2 +1,2 @@
-import { contextBridge } from 'electron';
-contextBridge.exposeInMainWorld('desktop', { platform: process.platform });
+import { contextBridge } from "electron";
+contextBridge.exposeInMainWorld("desktop", { platform: process.platform });
