@@ -31,7 +31,14 @@ export class CdpClient {
   async evaluate<T>(expression: string): Promise<T | undefined> {
     const response = await this.send<{
       result?: { value?: T };
-      exceptionDetails?: { text?: string };
+      exceptionDetails?: {
+        text?: string;
+        lineNumber?: number;
+        columnNumber?: number;
+        exception?: {
+          description?: string;
+        };
+      };
     }>("Runtime.evaluate", {
       expression,
       returnByValue: true,
@@ -39,8 +46,15 @@ export class CdpClient {
     });
 
     if (response.exceptionDetails) {
-      throw new Error(response.exceptionDetails.text ?? "CDP Runtime.evaluate failed");
+      console.error("CDP evaluate error:", JSON.stringify(response.exceptionDetails, null, 2));
+
+      throw new Error(
+        response.exceptionDetails.exception?.description ??
+          response.exceptionDetails.text ??
+          "CDP Runtime.evaluate failed",
+      );
     }
+
     return response.result?.value;
   }
 

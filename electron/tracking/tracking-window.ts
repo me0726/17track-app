@@ -25,6 +25,42 @@ export class TrackingWindow extends EventEmitter {
     await window.loadURL(`${trackingUrl}${encodedNumbers}`);
     this.cdp = new CdpClient(window.webContents);
     await this.cdp.attach();
+    await this.cdp.send("Page.enable");
+
+    window.webContents.executeJavaScript(
+      //language=JavaScript
+      `
+        (() => {
+          
+          let latestPastedText=null;
+          
+          const oldExecCommand = document.execCommand;
+          
+          window.latestPastedText=()=>latestPastedText;
+
+          document.execCommand = function(cmd, ...args) {
+
+            if (cmd.toLowerCase() === "copy") {
+              console.log("拦截 copy");
+
+              const selection = window.getSelection();
+              const text = selection ? selection.toString() : "";
+
+              console.log("复制内容:", text,args);
+              latestPastedText=text;
+              // 不调用原始 execCommand
+              return true;
+            }
+
+            return oldExecCommand.call(
+              document,
+              cmd,
+              ...args
+            );
+          };
+        })();
+    `,
+    );
     this.pageAdapter = new CdpTrackingPageAdapter(this.cdp);
     this.startPageInspection();
   }

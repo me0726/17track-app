@@ -106,13 +106,32 @@ export class TaskManager extends EventEmitter {
     this.emitTasksChanged();
     try {
       await this.trackingWindow.openBatch(batchItems.map((item) => item.trackingNumber));
+      await this.wait(() => this.trackingWindow.isBatchReady());
+      await this.trackingWindow.readResults();
     } catch (error) {
       const message = error instanceof Error ? error.message : "查询窗口打开失败";
       this.setStatusFromRunner(taskId, "failed", message);
     }
     return updated;
   }
+  async wait(condition: () => Promise<boolean>, timeout = 10000, interval = 200) {
+    const start = Date.now();
 
+    while (Date.now() - start < timeout) {
+      if (await condition()) {
+        console.log("等待完成")
+        return true;
+      }
+
+      await this.sleep(interval);
+    }
+
+    throw new Error("等待超时");
+  }
+
+  async sleep(ms: number) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
   private recoverInterruptedTasks() {
     for (const task of this.store.listTasks()) {
       if (task.status === "running" || task.status === "waiting") {

@@ -31,12 +31,26 @@ export class CdpTrackingPageAdapter implements TrackingPageAdapter {
 
   async isBatchReady() {
     // TODO: inspect the current 17TRACK result/loading indicators and implement a reliable readiness check.
-    return (await this.cdp.evaluate<boolean>(`Boolean(document.body?.innerText)`)) ?? false;
+    try {
+      return (
+        (await this.cdp.evaluate<boolean>(
+          `document.body?.innerText.indexOf("查询中，请稍候…")<0 && document.querySelector("#yq-tracking-operation button:nth-of-type(2)")!=undefined`,
+        )) ?? false
+      );
+    }catch (e) {
+      console.error("检查文档ready失败",e);
+      return false;
+    }
   }
 
   async readResults(): Promise<TrackingResult[]> {
+    this.cdp.evaluate<void>(
+      `document.querySelector("#yq-tracking-operation button:nth-of-type(2)").click()`,
+    );
     // TODO: inspect the page's rendered result cards or app state and map them to TrackingResult.
     // Keep all 17TRACK-specific selectors and fields in this adapter.
+    let value = await this.cdp.evaluate<string>(`window.latestPastedText()`);
+    console.log(value);
     return [];
   }
 }
