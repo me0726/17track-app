@@ -1,10 +1,4 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type {
-  CreateTrackingTaskInput,
-  TaskLogEntry,
-  TaskStatus,
-  TrackingTask,
-} from "./types.js" with { "resolution-mode": "import" };
 
 const subscribe = <T,>(channel: string, callback: (value: T) => void) => {
   const listener = (_event: Electron.IpcRendererEvent, value: T) => callback(value);
@@ -15,13 +9,19 @@ const subscribe = <T,>(channel: string, callback: (value: T) => void) => {
 contextBridge.exposeInMainWorld("desktop", {
   platform: process.platform,
   tasks: {
-    list: () => ipcRenderer.invoke("tasks:list") as Promise<TrackingTask[]>,
-    logs: () => ipcRenderer.invoke("tasks:logs") as Promise<TaskLogEntry[]>,
-    create: (input: CreateTrackingTaskInput) =>
-      ipcRenderer.invoke("tasks:create", input) as Promise<TrackingTask>,
-    updateStatus: (taskId: string, status: TaskStatus) =>
-      ipcRenderer.invoke("tasks:update-status", taskId, status) as Promise<TrackingTask>,
-    onChanged: (callback: (tasks: TrackingTask[]) => void) => subscribe("tasks:changed", callback),
-    onLog: (callback: (entry: TaskLogEntry) => void) => subscribe("tasks:log", callback),
+    list: () => ipcRenderer.invoke("tasks:list"),
+    get: (id: number) => ipcRenderer.invoke("tasks:get", id),
+    batches: (trackingNumber?: string) => ipcRenderer.invoke("tasks:batches", trackingNumber),
+    batch: (id: number) => ipcRenderer.invoke("tasks:batch", id),
+    export: (id: number) => ipcRenderer.invoke("tasks:export", id),
+    itemsPage: (query: unknown) => ipcRenderer.invoke("tasks:items-page", query),
+    create: (input: { numbers: string[]; sourceFileName?: string }) =>
+      ipcRenderer.invoke("tasks:create", input),
+    pause: (id: number) => ipcRenderer.invoke("tasks:pause", id),
+    resume: (id: number) => ipcRenderer.invoke("tasks:resume", id),
+    retryFailed: (id: number) => ipcRenderer.invoke("tasks:retry-failed", id),
+    onChanged: (callback: (tasks: unknown[]) => void) => subscribe("tasks:changed", callback),
+    onMessage: (callback: (message: { taskId: number; message: string }) => void) =>
+      subscribe("tasks:message", callback),
   },
 });

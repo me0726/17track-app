@@ -1,338 +1,124 @@
-# Trackbox 项目功能与架构设计
+# 物流查询：功能与数据存储
+
+应用提供三个简单页面：**物流查询**、**任务记录**和**原始内容**。使用 Electron + React + Tailwind CSS + shadcn 默认 neutral 主题，主窗口初始为 800 × 600，支持调整大小，最小为 800 × 600。顶部保留页面切换，底部显示任务运行状态，各页面统一使用 shadcn Card 布局，内容区独立滚动，分页与主要操作固定在底部。任务创建时间放在任务名称下方，状态使用 Badge，总数、已完成与失败分别右对齐显示。
+
+## 使用流程
+
+1. 输入快递单号或导入 Excel。导入仅填充输入框，不创建任务。
+2. 点击“开始查询”：在同一个数据库事务中创建一条 task 和去重后的 task_item，每个单号一条明细。
+3. 浏览器按每批最多 40 个单号查询。每批复制成功，在同一事务中把完整复制原文写入 task_batch、解析结果写入 task_item，并关联批次。
+4. 暂停会中止页面等待并关闭查询窗口，已经提交的结果保留。
+5. 只有暂停的任务可以继续，仅读取 pending（等待中）的 task_item，已完成与失败明细均保持原状态。
+6. 重启后，上次中断的 running 任务转为 paused，可在任务记录页手动继续。
 
-## 1. 项目定位
+同一时间只运行一个任务。任务状态只有 running（查询中）、paused（暂停）、ended（已结束）。查询完成或发生查询错误后，任务均为已结束，错误原因记录在对应 task_item 中。已结束任务没有继续按钮；详情存在失败明细时可点击“重试失败项”，在事务中将 failed 回退为 pending、清空旧错误和解析结果，并将任务置为暂停，随后立即重新启动查询。已完成明细与原始批次保留。
 
-Trackbox 是一个基于 Electron 的本地自动化工具箱。用户从工具列表中选择功能，工具在独立的工作区内执行任务，应用顶部统一显示任务进度和运行日志。
+任务记录列表将总数、已完成、失败分为三列，数字右对齐，失败数大于零时使用醒目的错误色，便于逐行比较。
 
-首个工具是 17TRACK 物流查询：用户导入 Excel 订单，或直接粘贴物流单号；应用去重后按每批最多 40 个单号打开 17TRACK 查询页面。当页面出现人机验证时，任务暂停并把真实的 17TRACK 页面交给用户处理。
+查询页仅保留导入、输入和查询操作。任务详情仅显示**单号、物流信息、状态**三列，长文本截断，悬停显示完整内容；点击物流信息打开原始内容页的对应批次。尚未复制的明细不显示原文链接。详情按状态筛选、每页 10 条，支持导出整个任务的 Excel 明细，导出列与页面一致，不受当前筛选和分页影响。
 
-应用不尝试绕过、破解或自动完成验证码。验证码必须由用户在 17TRACK 页面中人工完成。
+## SQLite
 
-## 2. 已确认的产品规则
+直接使用当前 Electron 内置的 node:sqlite，不依赖 ORM 或额外原生扩展。文件位于 app.getPath("userData") 下的 **trackbox.sqlite**，启用 WAL、外键和事务。
 
-- 首期只支持 Excel 文件和手动粘贴单号。
-- 用户只提供物流单号，物流商由 17TRACK 自动识别。
-- 单号自动去重，查询批次上限为 40 个单号。
-- 任务和日志保存到本地，应用重启后任务可以继续。
-- 关闭 17TRACK 查询窗口会暂停当前任务。
-- 人机验证出现后暂停当前任务，并显示验证窗口。
-- 任务中心采用浏览器下载中心式的顶部入口，不单独占用一个复杂页面。
-- 暂时不做第三方插件系统，工具通过代码内模块注册。
-- 默认 Electron 主窗口固定为 800 x 600，禁止调整大小、最大化和全屏。
+| 表         | 字段                     | 用途                                         |
+| ---------- | ------------------------ | -------------------------------------------- |
+| task       | id                       | 自增主键                                     |
+| task       | name、source_file        | 任务名称和来源文件                           |
+| task       | status                   | running / paused / ended                     |
+| task       | created_at、updated_at   | 创建与更新时间                               |
+| task_item  | id、task_id              | 自增主键和所属任务外键                       |
+| task_item  | tracking_number          | 物流单号，同一任务内唯一                     |
+| task_item  | status                   | pending / processing / completed / failed    |
+| task_item  | result_text              | 按单号解析后的单行 TSV 内容                  |
+| task_item  | origin_country 等字段    | 始发地、目的地、最新轨迹、物流状态、运输时长 |
+| task_item  | error                    | 未匹配或格式错误的原因                       |
+| task_item  | batch_id、batch_no       | 结果关联的原始批次外键及批次编号             |
+| task_item  | updated_at               | 明细更新时间                                 |
+| task_batch | id、task_id              | 批次主键和所属任务外键                       |
+| task_batch | batch_no                 | 任务内递增批次号，任务内唯一                 |
+| task_batch | raw_text                 | 完整未解析复制文本，原样保留空白和换行       |
+| task_batch | tracking_numbers         | 当前批次请求的单号 JSON 数组                 |
+| task_batch | number_count、created_at | 请求单号数和复制保存时间                     |
 
-## 3. 技术选型
+任务总数、已保存数量直接从 task_item 汇总。任务创建和批次结果写入均使用事务；空结果不计为完成，批次写入中有一条失败则整批回滚。
 
-### 桌面层
+每次成功拦截复制都会新增 task_batch，包括原文无法解析的批次。未匹配或解析失败的明细也关联该批次。重试更新明细的 batch_id，追加新原文，不覆盖旧批次；尚未再次复制时保留上次的来源关联。原始内容列表只读取批次元数据，打开某个批次后再读取完整原文。开发阶段直接按当前结构建表，不包含旧结构的数据迁移。
 
-- Electron：提供一致的 Chromium 页面环境、独立浏览器窗口、持久化 session 和窗口生命周期事件。
-- React + TypeScript：渲染应用界面。
-- Vite：前端开发和构建。
+原始内容页支持按完整单号搜索，去除首尾空格、忽略大小写。SQLite 使用 json_each 在 tracking_numbers 中精确匹配，不在原文内做子串匹配，避免 AA1 匹配 AA10。所有相关任务、历史重试批次按保存顺序倒序返回，解析失败或原文缺少该单号时仍可搜索到提交该单号的批次。清空或重置搜索后显示全部批次。
 
-### UI 层
+原始内容列表的单号搜索和详情的页内查找均放在标题右侧，查看关联任务的入口放在原文详情左下方。原始内容详情支持页内查找：输入后立即高亮所有匹配，忽略大小写、按普通文本匹配，显示当前匹配序号和总数。上一个/下一个按钮或 Shift+Enter / Enter 循环切换并滚动定位，Ctrl+F / ⌘F 聚焦查找框，Esc 清空。原文的制表符、换行和空白原样显示，查找只影响展示。同一批次更新期间保留查找内容，切换批次重新开始。
 
-- Tailwind CSS v4：布局和页面 utility class。
-- shadcn/ui：基础 UI 组件，当前项目使用 Base UI primitive。
-- lucide-react：图标。
-- shadcn 默认 neutral 主题：使用语义 token，如 `bg-background`、`text-muted-foreground`、`bg-primary`。
+### 结果分段
 
-### 数据和输入
+复制结果按制表符分成六列：快递单号、始发国家、目的国家、最新轨迹、物流状态、运输时长。每行第一个字段必须精确匹配任务中的快递单号；缺少单号、重复单号或列数不足会写入 failed，并保留 error 原因。结果不会按字符串包含关系匹配，避免 AA1 错配到 AA10。
 
-- `xlsx`：读取 `.xlsx` / `.xls` 文件。
-- Electron 用户数据目录下的 JSON 文件：保存任务、单号和日志。当前文件名为 `trackbox-state.json`。
+## 浏览器操作
 
-后续如果单号量和历史任务明显增长，可以把持久化层替换为 SQLite；任务管理器和渲染层不应直接依赖具体存储实现。
+使用真实 Electron BrowserWindow 和 persist:17track 会话，通过 webContents.debugger 调用 CDP：
 
-## 4. 界面架构
+1. 通过 https://t.17track.net/zh-cn#nums=... 填入当前批次。
+2. 等待“查询中，请稍后”或“查询中，请稍候”消失，并连续两次检查操作栏第二个按钮可用。
+3. 出现人机验证时，由用户在同一个浏览器窗口手动完成，验证等待不计入查询超时。
+4. 点击 #yq-tracking-operation 或 .yq-tracking-operation 内第二个 button。
+5. 页面加载前注入 `document.execCommand("copy")` 拦截，点击按钮后直接获取选中文本或 `copy` 事件提供的文本，立即写入数据库。自动提取不读写系统剪贴板；若网页改用 Clipboard API 写入，则拒绝并报错。
+6. 继续下一批。
 
-### 应用壳层
+关闭浏览器或主窗口会暂停当前任务。退出应用时等待当前任务中止并保存状态，再关闭数据库。
 
-应用壳层由 `src/main.tsx` 负责，提供：
+## 代码结构
 
-- 左侧工具导航，目前只有“物流查询”。
-- 顶部面包屑。
-- 顶部任务中心 Popover。
-- 顶部运行日志 Popover。
-- 当前工具工作区。
-- 固定窗口内的滚动边界和页脚。
+    src/
+    ├── main.tsx           React 挂载入口
+    ├── App.tsx            页面组合、导航与 IPC 订阅
+    ├── QueryForm.tsx      Excel/手动输入和查询操作
+    ├── TaskHistory.tsx    任务记录列表
+    ├── TaskDetailView.tsx 单号明细、状态筛选、分页和导出
+    ├── RawCopies.tsx      原始批次列表及复制原文查看
+    ├── RawCopyContent.tsx 原文详情、页内查找与高亮定位
+    ├── input-parser.ts    Excel 读取和单号去重
+    ├── vite-env.d.ts      Preload API 类型
+    └── components/ui/     shadcn 组件
 
-首屏没有选择工具时显示任务首页；选择“物流查询”后进入物流工具页。
+    electron/
+    ├── main.ts            窗口、任务执行、暂停/继续和 IPC
+    ├── database.ts        SQLite 三张表及数据读写
+    ├── export.ts          任务明细 Excel 生成
+    ├── result-parser.ts   复制文本按单号分段
+    ├── copy-capture.ts    页面内拦截复制文本
+    ├── task-types.ts      主进程与 React 共用的任务类型
+    ├── tracking.ts        17TRACK 查询与复制流程
+    └── preload.cts        CommonJS 桥接
 
-### 任务首页
+保留具体业务模块，没有通用工具注册、进度条、任务调度框架或日志中心。
 
-任务首页展示：
+## Preload API
 
-- 进行中任务数量。
-- 已完成单号数量。
-- 当前工具数量。
-- 当前任务的大进度卡片。
-- 所有任务的简要列表。
-- 无任务时的 shadcn `Empty` 状态。
+- tasks.create({ numbers, sourceFileName? })：先创建数据，再启动查询，返回任务详情。
+- tasks.list() / tasks.get(id)：任务列表和包含 task_item 的详情。
+- tasks.itemsPage({ taskId, status, page, pageSize })：详情页按状态分页读取单号。
+- tasks.export(id)：通过系统保存对话框导出整个任务的 Excel；取消时返回 null。
+- tasks.batches(trackingNumber?) / tasks.batch(id)：按单号筛选的原始批次摘要列表与完整原文（含所属任务和请求单号）。
+- tasks.pause(id) / tasks.resume(id)：暂停与继续同一任务；继续仅允许暂停状态。
+- tasks.retryFailed(id)：仅对已结束且存在失败明细的任务，将失败明细回退为等待中，再启动查询。
+- tasks.onChanged(callback)：数据库内容变更后刷新列表。
+- tasks.onMessage(callback)：接收当前查询状态文案。
 
-首页是任务观察入口，不负责执行查询逻辑。
+以上 API 位于 window.desktop.tasks；React 不直接操作数据库或 Node.js。
 
-### 物流查询页
+## Excel
 
-物流查询页只负责输入任务：
+只读第一个工作表。首行包含“物流单号、快递单号、运单号、跟踪号、追踪号、tracking、waybill、单号”等标题时读取对应列，否则读取第一列。空值被删除，单号统一为大写后去重。Excel 应把快递号保存为文本，避免长数字在源文件中丢失精度。
 
-- 拖放或选择 Excel。
-- 手动粘贴单号。
-- 展示去重后的单号数量。
-- 显示输入错误。
-- 创建查询任务。
+## 开发与验证
 
-查询设置、运行概览和最近任务不单独展示。任务状态统一由顶部任务中心维护。
+    npm install
+    npm run dev
+    OPEN_DEVTOOLS=1 npm run dev
+    npm run build
+    npm test
+    npm run format:check
 
-### 任务中心
+dev 会先编译主进程与 CommonJS Preload，Vite 使用相对资源路径以兼容 Electron loadFile。
 
-任务中心使用 shadcn `Popover`、`Card`、`Progress`、`Badge` 和 `ScrollArea` 组合：
-
-- 展示所有任务的状态、数量、批次和进度。
-- 运行中任务可暂停。
-- 暂停任务可继续。
-- 等待验证任务可在用户完成验证后继续。
-- 已完成任务保留在任务列表中。
-
-### 日志
-
-日志使用独立 Popover 展示。日志由主进程产生，渲染进程通过 IPC 订阅实时事件。当前界面支持查看、搜索输入框和清空当前视图；日志数据仍保留在本地状态文件中。
-
-## 5. 代码模块划分
-
-```text
-src/
-├── main.tsx                         React 挂载入口
-├── app/
-│   ├── App.tsx                       页面组合和工具选择状态
-│   ├── AppShell.tsx                  Electron 应用壳层和全局 Popover
-│   └── useTaskCenter.ts              任务/日志 IPC 订阅和操作
-├── shared/task.ts                   渲染进程任务契约
-├── features/
-│   ├── task-center/
-│   │   ├── TaskHome.tsx             默认任务首页
-│   │   ├── TaskPopover.tsx           顶部任务中心
-│   │   ├── LogPopover.tsx            运行日志
-│   │   ├── StatusIcon.tsx            任务状态图标
-│   │   └── types.ts                  任务展示类型和状态文案
-│   └── tracking/
-│       ├── TrackingTool.tsx          物流查询输入界面
-│       ├── useTrackingInput.ts       输入状态和任务创建
-│       └── input-parser.ts           Excel 和手动单号解析
-├── components/ui/                   shadcn 组件
-└── style.css                        Tailwind/shadcn 全局主题
-
-electron/
-├── main.ts                          Electron 生命周期和窗口创建
-├── preload.ts                       白名单 IPC API
-├── ipc.ts                            IPC handler 注册
-├── types.ts                          主进程任务契约
-├── persistence/
-│   └── task-store.ts                 本地任务和日志存储
-├── tasks/
-│   └── task-manager.ts               任务状态、批次入口和恢复逻辑
-└── tracking/
-    ├── tracking-window.ts            Electron 窗口生命周期和批次导航
-    ├── cdp-client.ts                 Chrome DevTools Protocol 封装
-    └── tracking-page-adapter.ts      17TRACK 页面操作 TODO 接口
-```
-
-## 6. 任务状态机
-
-```text
-QUEUED
-  └─> RUNNING
-        ├─> WAITING_HUMAN  检测到人机验证
-        ├─> PAUSED         用户暂停或窗口关闭
-        ├─> FAILED         查询窗口或批次失败
-        └─> COMPLETE       所有批次完成
-
-WAITING_HUMAN ──人工完成验证──> RUNNING
-PAUSED ──用户点击继续──> RUNNING
-```
-
-代码中的状态为：
-
-```ts
-type TaskStatus = "queued" | "running" | "waiting" | "paused" | "complete" | "failed" | "cancelled";
-```
-
-`cancelled` 表示用户主动取消。取消后的任务保留在任务记录中，不会自动恢复。
-
-### 重启恢复
-
-应用启动时：
-
-1. 读取 `trackbox-state.json`。
-2. 把上次处于 `running` 或 `waiting` 的任务标成 `paused`，原因设为 `app-restart`。
-3. 创建主窗口和 17TRACK runner。
-4. 自动恢复 `pauseReason === "app-restart"` 的任务。
-
-用户主动暂停和查询窗口关闭产生的暂停原因分别是 `user` 和 `window-closed`，不会在下一次启动时自动重跑。
-
-## 7. 数据模型
-
-### 任务
-
-```ts
-interface TrackingTask {
-  id: string;
-  kind: "tracking";
-  name: string;
-  sourceFileName?: string;
-  createdAt: string;
-  updatedAt: string;
-  status: TaskStatus;
-  total: number;
-  done: number;
-  failed: number;
-  currentBatch: number;
-  totalBatches: number;
-  batchSize: number;
-  items: TrackingItem[];
-  error?: string;
-  pauseReason?: "user" | "window-closed" | "app-restart";
-}
-```
-
-### 单号
-
-```ts
-interface TrackingItem {
-  id: string;
-  sourceRow?: number;
-  trackingNumber: string;
-  status: "pending" | "running" | "complete" | "failed";
-  statusText?: string;
-  carrier?: string;
-  updatedAt?: string;
-}
-```
-
-保留 `sourceRow` 是为了后续导出时能把查询结果映射回 Excel 原始行。
-
-### 日志
-
-```ts
-interface TaskLogEntry {
-  id: string;
-  taskId?: string;
-  createdAt: string;
-  level: "info" | "warn" | "error";
-  message: string;
-}
-```
-
-日志最多保留最近 500 条，避免本地状态文件无限增长。
-
-## 8. Excel 和单号解析
-
-`src/features/tracking/input-parser.ts` 负责输入解析：
-
-1. 读取第一个工作表。
-2. 如果首行包含“物流单号、运单号、跟踪号、tracking、waybill、单号”等标题，使用对应列。
-3. 如果无法识别标题，默认使用第一列。
-4. 删除空值。
-5. 按不区分大小写的单号去重。
-6. 保留 Excel 行号。
-
-手动输入支持空格、换行、英文逗号、中文逗号、英文分号和中文分号分隔。
-
-## 9. 进程通信
-
-Preload 只暴露白名单 API：
-
-```ts
-window.desktop.tasks.list();
-window.desktop.tasks.logs();
-window.desktop.tasks.create(input);
-window.desktop.tasks.updateStatus(taskId, status);
-window.desktop.tasks.onChanged(callback);
-window.desktop.tasks.onLog(callback);
-```
-
-React 不直接访问 Node.js、文件系统或 Electron IPC。所有任务修改由主进程完成，主进程保存后广播 `tasks:changed`，日志通过 `tasks:log` 广播。
-
-## 10. 17TRACK 查询窗口
-
-`electron/tracking/tracking-window.ts` 使用：
-
-- `BrowserWindow` 承载真实 17TRACK 页面。
-- `session.fromPartition("persist:17track")` 保存 Cookie 和验证会话。
-- 每批最多 40 个单号。
-- URL 形态：`https://t.17track.net/zh-cn#nums=...`。
-- 查询窗口关闭事件通知任务管理器暂停任务。
-- `webContents.debugger` 连接 Chrome DevTools Protocol。
-- `Runtime.evaluate`、等待元素、点击、读取文本和设置输入值统一由 `CdpClient` 提供。
-- 页面文本、验证码节点和验证码 iframe 用于检测人机验证。
-
-当前 runner 已完成窗口、持久化 session、批次 URL、CDP 连接、验证轮询和窗口关闭状态回传。
-
-网页访问完全复用当前 Electron 项目的 `BrowserWindow`，没有引入第二套浏览器自动化运行时。CDP 只通过这个窗口的 `webContents.debugger` 操作页面，因此 Cookie、验证状态和用户看到的页面属于同一个 Electron session。
-
-### CDP 页面操作接口
-
-`electron/tracking/tracking-page-adapter.ts` 是唯一放置 17TRACK 页面选择器和字段映射的地方：
-
-```ts
-interface TrackingPageAdapter {
-  detectHumanVerification(): Promise<boolean>;
-  isBatchReady(): Promise<boolean>;
-  readResults(): Promise<TrackingResult[]>;
-}
-```
-
-其中 `CdpTrackingPageAdapter` 已提供可运行的验证检测占位实现，结果读取和稳定的批次完成条件保留 TODO。后续手动补页面操作时，优先使用 `CdpClient` 的以下方法：
-
-```ts
-cdp.waitForSelector(selector);
-cdp.click(selector);
-cdp.readText(selector);
-cdp.setInputValue(selector, value);
-cdp.evaluate(expression);
-```
-
-不要在 React 组件或任务管理器中直接写页面选择器。这样 17TRACK 页面改版时只需要修改 adapter。
-
-## 11. 当前实现边界
-
-已经实现：
-
-- Electron + React + TypeScript + Vite 工程。
-- Tailwind CSS v4 和 shadcn/ui 界面。
-- 固定 800 x 600 主窗口。
-- Excel 和手动单号输入。
-- 单号识别、去重和来源行号保存。
-- 任务 JSON 持久化。
-- 日志持久化和 IPC 实时订阅。
-- 任务状态变更、暂停、继续和应用重启恢复。
-- 持久化 17TRACK 浏览器 session。
-- 人机验证和查询窗口关闭检测。
-
-尚未闭环：
-
-- 从 17TRACK 页面稳定读取每个单号的完整物流结果，需要在 `tracking-page-adapter.ts` 中完成 CDP 选择器和字段映射。
-- 批次完成后自动写入 `TrackingItem` 结果并推进下一批。
-- 结果导出为 Excel。
-- 任务详情页和订单结果表格。
-- 失败批次的重试策略和超时策略。
-- 真实网络环境下的人机验证回归测试。
-
-17TRACK 是动态网页，结果字段和验证节点可能变化。结果解析应放在 `tracking-window.ts` 或独立的 `tracking-result-parser.ts` 中，并通过页面样本和手工验证流程维护，不应把选择器散落在 React 组件中。
-
-## 12. 开发和验证命令
-
-```bash
-npm install
-npm run dev
-npm run build
-npm run format:check
-```
-
-开发时如果需要自动打开 Electron 控制台：
-
-```bash
-OPEN_DEVTOOLS=1 npm run dev
-```
-
-Preload 使用独立的 CommonJS 编译目标 `electron/preload.cts`，产物是 `dist-electron/preload.cjs`；主进程仍然使用 ESM。这样可以避免 Electron 沙箱加载 ESM Preload 时出现 `Cannot use import statement outside a module`。
-
-`npm run build` 会同时检查 React、Electron、Preload 和 TypeScript 共享契约。当前构建已通过；网络受限时无法通过 curl 验证 17TRACK 的实时页面，只能在有网络的桌面环境中做人工窗口和页面解析测试。
+数据库测试覆盖创建事务、去重、分段、批次原文、部分结果保存、暂停/继续、任务结束、失败项回退重试、重启恢复和批次回滚。17TRACK 线上页面改版时，调整 tracking.ts 中的等待条件和操作栏选择器即可。
